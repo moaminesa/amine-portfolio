@@ -12,7 +12,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "npx --yes vite build",
+    "build": "./node_modules/.bin/vite build",
     "preview": "vite preview"
   }
 }
