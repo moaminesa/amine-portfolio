@@ -1,0 +1,1029 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ── Logo ─────────────────────────────────────────────────────────────
+function Logo({ size = 40, color = "#FF6A00" }) {
+  const vw=100,vh=120,apexX=62,apexY=2,leftBotX=8,leftBotY=vh-2,rightBotX=92,rightBotY=vh-2;
+  const crossY=vh*0.56;
+  const crossLeftX  = apexX + ((crossY-apexY)/(leftBotY-apexY))*(leftBotX-apexX) - 10;
+  const crossRightX = apexX + ((crossY-apexY)/(rightBotY-apexY))*(rightBotX-apexX);
+  const sw=size*0.092;
+  return (
+    <svg width={size*0.85} height={size} viewBox={`0 0 ${vw} ${vh}`} fill="none"
+      style={{display:"block",filter:`drop-shadow(0 0 8px ${color}88)`}}>
+      <line x1={apexX} y1={apexY} x2={leftBotX}  y2={leftBotY}  stroke={color} strokeWidth={sw} strokeLinecap="square"/>
+      <line x1={apexX} y1={apexY} x2={rightBotX} y2={rightBotY} stroke={color} strokeWidth={sw} strokeLinecap="square"/>
+      <line x1={crossLeftX} y1={crossY} x2={crossRightX} y2={crossY} stroke={color} strokeWidth={sw*0.85} strokeLinecap="square"/>
+    </svg>
+  );
+}
+
+// ── Scope cursor + zoom controller — ALL direct DOM, zero React lag ──
+function ScopeCursor() {
+  const wrapRef = useRef(null);
+  const svgRef  = useRef(null);
+
+  useEffect(() => {
+    const el = wrapRef.current, svg = svgRef.current;
+    if (!el || !svg) return;
+
+    const SN = 80, SZ = 140;
+    const SCALE = 2; // exactly 2x zoom
+    let curS = SN;
+    let mx = window.innerWidth / 2, my = window.innerHeight / 2;
+    let zoomed = false;
+
+    const build = s => {
+      const cx=s/2, cy=s/2, r=s*0.4, gap=s*0.1, sw=s<100?1.0:1.5;
+      const c="#FF6A00", cd="rgba(255,106,0,0.5)";
+      const mv=[-2,-1,1,2].map(i=>{const l=Math.abs(i)===2?s*0.038:s*0.055,py=cy+i*(r/3.4);return`<line x1="${cx-l}" y1="${py}" x2="${cx+l}" y2="${py}" stroke="${c}" stroke-width="0.7" opacity="0.6"/>`;}).join('');
+      const mh=[-2,-1,1,2].map(i=>{const l=Math.abs(i)===2?s*0.038:s*0.055,px=cx+i*(r/3.4);return`<line x1="${px}" y1="${cy-l}" x2="${px}" y2="${cy+l}" stroke="${c}" stroke-width="0.7" opacity="0.35"/>`;}).join('');
+      const br=[[-1,-1],[1,-1],[-1,1],[1,1]].map(([sx,sy])=>{const bx=cx+sx*r*0.76,by=cy+sy*r*0.76,bl=s*0.07;return`<g opacity="0.5"><line x1="${bx}" y1="${by}" x2="${bx+sx*bl}" y2="${by}" stroke="${c}" stroke-width="${sw}"/><line x1="${bx}" y1="${by}" x2="${bx}" y2="${by+sy*bl}" stroke="${c}" stroke-width="${sw}"/></g>`;}).join('');
+      const lbl = s>=100 ? `<text x="${cx+r*0.44}" y="${cy-r*0.58}" fill="${c}" font-size="${s*0.1}" font-family="Share Tech Mono,monospace" opacity="0.9">2x</text>` : '';
+      return `<circle cx="${cx}" cy="${cy}" r="${r}" stroke="${c}" stroke-width="${sw}" opacity="0.92"/>
+        <circle cx="${cx}" cy="${cy}" r="${r*0.62}" stroke="${cd}" stroke-width="0.6" stroke-dasharray="3 4"/>
+        <circle cx="${cx}" cy="${cy}" r="${r*0.3}" stroke="${cd}" stroke-width="0.5" opacity="0.55"/>
+        <line x1="${cx}" y1="${cy-r+1}" x2="${cx}" y2="${cy-gap}" stroke="${c}" stroke-width="${sw}"/>
+        <line x1="${cx}" y1="${cy+gap}" x2="${cx}" y2="${cy+r-1}" stroke="${c}" stroke-width="${sw}"/>
+        <line x1="${cx-r+1}" y1="${cy}" x2="${cx-gap}" y2="${cy}" stroke="${c}" stroke-width="${sw}"/>
+        <line x1="${cx+gap}" y1="${cy}" x2="${cx+r-1}" y2="${cy}" stroke="${c}" stroke-width="${sw}"/>
+        ${mv}${mh}${br}
+        <circle class="cdot" cx="${cx}" cy="${cy}" r="${s<100?2:3}" fill="${c}" opacity="0.88"/>
+        <circle class="fr1" cx="${cx}" cy="${cy}" r="${r*0.22}" fill="${c}" opacity="0"/>
+        <circle class="fr2" cx="${cx}" cy="${cy}" r="${r*0.5}" stroke="${c}" stroke-width="1" opacity="0"/>
+        ${lbl}`;
+    };
+
+    const render = s => {
+      svg.setAttribute('width', s); svg.setAttribute('height', s);
+      svg.setAttribute('viewBox', `0 0 ${s} ${s}`);
+      svg.innerHTML = build(s);
+      el.style.width = s + 'px'; el.style.height = s + 'px';
+    };
+
+    render(curS);
+    el.style.transform = `translate(${mx - curS/2}px,${my - curS/2}px)`;
+    el.style.filter = 'drop-shadow(0 0 4px rgba(255,106,0,0.4))';
+
+    // ── Zoom math:
+    // We want: the world-point under the cursor at mousedown stays fixed on screen.
+    // Strategy: set transformOrigin to top-left (0,0), then use translate + scale.
+    // translate(tx, ty) scale(S) means: point P in world appears at S*P + (tx,ty) on screen.
+    // We want S*zoomOrigin + (tx,ty) = zoomOrigin (lock that screen point).
+    // => tx = zoomOrigin.x * (1 - S), ty = zoomOrigin.y * (1 - S)
+    const applyZoom = () => {
+      const root = document.getElementById('zoom-root');
+      if (!root) return;
+      // Always zoom centered on current cursor position — RPG scope tracking
+      const tx = mx * (1 - SCALE);
+      const ty = my * (1 - SCALE);
+      root.style.transition = 'none';
+      root.style.transformOrigin = '0 0';
+      root.style.transform = `translate(${tx}px, ${ty}px) scale(${SCALE})`;
+    };
+
+    const onMove = e => {
+      mx = e.clientX; my = e.clientY;
+      el.style.transform = `translate(${mx - curS/2}px,${my - curS/2}px)`;
+      // While zoomed: re-apply zoom centered on new cursor pos every frame — this is the RPG scope behavior
+      if (zoomed) applyZoom();
+    };
+
+    const onFire = () => {
+      const r1=svg.querySelector('.fr1'), r2=svg.querySelector('.fr2'), dot=svg.querySelector('.cdot');
+      if(r1) r1.setAttribute('opacity','0.55');
+      if(r2) r2.setAttribute('opacity','0.3');
+      if(dot) dot.setAttribute('opacity','1');
+      el.style.filter = 'drop-shadow(0 0 20px #FF6A00)';
+      setTimeout(()=>{
+        if(r1) r1.setAttribute('opacity','0');
+        if(r2) r2.setAttribute('opacity','0');
+        if(dot) dot.setAttribute('opacity','0.88');
+        el.style.filter = 'drop-shadow(0 0 4px rgba(255,106,0,0.4))';
+      }, 120);
+    };
+
+    const onDown = e => {
+      if (e.button !== 2) return;
+      e.preventDefault();
+      zoomed = true;
+      curS = SZ; render(curS);
+      el.style.transform = `translate(${mx - curS/2}px,${my - curS/2}px)`;
+      el.style.filter = 'drop-shadow(0 0 10px rgba(255,106,0,0.9))';
+      applyZoom();
+      const vig = document.getElementById('zoom-vig');
+      if (vig) vig.style.opacity = '1';
+    };
+
+    const onUp = e => {
+      if (e.button !== 2) return;
+      zoomed = false;
+      curS = SN; render(curS);
+      el.style.transform = `translate(${mx - curS/2}px,${my - curS/2}px)`;
+      el.style.filter = 'drop-shadow(0 0 4px rgba(255,106,0,0.4))';
+      const root = document.getElementById('zoom-root');
+      if (root) {
+        root.style.transition = 'transform 0.12s ease';
+        root.style.transformOrigin = '0 0';
+        root.style.transform = 'translate(0px, 0px) scale(1)';
+      }
+      const vig = document.getElementById('zoom-vig');
+      if (vig) vig.style.opacity = '0';
+    };
+
+    const onCtx = e => e.preventDefault();
+
+    window.addEventListener('mousemove', onMove, { passive: true });
+    window.addEventListener('click', onFire);
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('contextmenu', onCtx);
+
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('click', onFire);
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('contextmenu', onCtx);
+    };
+  }, []);
+
+  return (
+    <div ref={wrapRef} style={{ position:'fixed', top:0, left:0, pointerEvents:'none', zIndex:9999, willChange:'transform' }}>
+      <svg ref={svgRef} fill="none" style={{ display:'block' }}/>
+    </div>
+  );
+}
+
+// ── Bullet: flies forward into screen — you see the BACK (casing) as it shrinks away ──
+// Redesigned SVG: shows rear of bullet from behind — circular casing cap, cylindrical body
+// No tip visible — bullet is flying AWAY from you. Shrinks as it goes into distance.
+function Bullet({ x, y, id, onDone }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const dur = 320; let start = null;
+    const tick = ts => {
+      if (!start) start = ts;
+      const t = Math.min((ts - start) / dur, 1);
+      const e3 = t * t * t;
+      const sc = 1 - e3 * 0.95; // shrinks almost to nothing
+      // Barely moves — just shrinks into the distance
+      el.style.transform = `translate(-50%,-50%) scale(${sc})`;
+      el.style.opacity = t < 0.5 ? 1 : 1 - (t - 0.5) / 0.5;
+      if (t < 1) requestAnimationFrame(tick); else onDone(id);
+    };
+    requestAnimationFrame(tick);
+  }, []);
+  return (
+    <div ref={ref} style={{ position:'fixed', left:x, top:y, zIndex:9998, pointerEvents:'none', willChange:'transform,opacity', filter:'drop-shadow(0 0 10px #FF6A00) drop-shadow(0 0 4px #FFAB00)' }}>
+      {/* View from BEHIND the bullet — you see the back casing cap flying away */}
+      <svg width={22} height={28} viewBox="0 0 22 28" fill="none">
+        {/* Cylindrical brass casing body */}
+        <rect x={5} y={4} width={12} height={20} rx={2} fill="#B8860B"/>
+        <rect x={5} y={4} width={12} height={20} rx={2} fill="url(#casingGrad)"/>
+        {/* Back face of casing — the circular cap you see from behind */}
+        <ellipse cx={11} cy={4} rx={6} ry={2.2} fill="#DAA520"/>
+        <ellipse cx={11} cy={4} rx={4} ry={1.4} fill="#FFD700" opacity="0.7"/>
+        <ellipse cx={11} cy={4} rx={2} ry={0.7} fill="#FFFAAA" opacity="0.6"/>
+        {/* Primer — small circle in center of base */}
+        <ellipse cx={11} cy={4} rx={1.2} ry={0.5} fill="#8B4513"/>
+        {/* Bottom crimp — narrowing at front (going away) */}
+        <ellipse cx={11} cy={24} rx={4.5} ry={1.5} fill="#8B6914" opacity="0.8"/>
+        {/* Highlight on casing side */}
+        <rect x={14} y={5} width={2} height={17} rx={1} fill="rgba(255,230,100,0.3)" opacity="0.8"/>
+        {/* Muzzle flash glow rings */}
+        <ellipse cx={11} cy={4} rx={8} ry={3} stroke="#FF8C00" strokeWidth="1" opacity="0.6" fill="none"/>
+        <ellipse cx={11} cy={4} rx={10} ry={4} stroke="#FF6A00" strokeWidth="0.5" opacity="0.3" fill="none"/>
+        <defs>
+          <linearGradient id="casingGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor="rgba(0,0,0,0.3)"/>
+            <stop offset="40%" stopColor="rgba(255,200,50,0.1)"/>
+            <stop offset="100%" stopColor="rgba(0,0,0,0.2)"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+  );
+}
+
+// ── Background decorative ROUND target — atmosphere, non-shootable ───
+function BgTarget({ pos, delay = 0, seed = 0 }) {
+  const [vis, setVis] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setVis(true), delay); return () => clearTimeout(t); }, [delay]);
+  const size = 26 + (seed % 5) * 7;
+  const opacity = 0.09 + (seed % 4) * 0.035;
+  return (
+    <div style={{
+      position:'fixed', left:pos.x, top:pos.y,
+      transform:`translate(-50%,-50%) scale(${vis ? 1 : 0.2})`,
+      opacity: vis ? opacity : 0,
+      transition:`transform 0.5s cubic-bezier(0.34,1.56,0.64,1) ${delay}ms, opacity 0.4s ease ${delay}ms`,
+      pointerEvents:'none', zIndex:3,
+      animation:'tFloat 5s ease-in-out infinite',
+      animationDelay:`${delay}ms`,
+    }}>
+      <svg width={size} height={size} viewBox="0 0 60 60" fill="none">
+        <circle cx={30} cy={30} r={28} stroke="#FF6A00" strokeWidth={1} strokeDasharray="4 5"/>
+        <circle cx={30} cy={30} r={18} stroke="#FF6A00" strokeWidth={0.8}/>
+        <circle cx={30} cy={30} r={5}  stroke="#FF6A00" strokeWidth={0.8}/>
+        <line x1={30} y1={2}  x2={30} y2={11} stroke="#FF6A00" strokeWidth={0.8}/>
+        <line x1={30} y1={49} x2={30} y2={58} stroke="#FF6A00" strokeWidth={0.8}/>
+        <line x1={2}  y1={30} x2={11} y2={30} stroke="#FF6A00" strokeWidth={0.8}/>
+        <line x1={49} y1={30} x2={58} y2={30} stroke="#FF6A00" strokeWidth={0.8}/>
+      </svg>
+    </div>
+  );
+}
+
+// ── Side target — SQUARE, fixed to screen edge, 3 hits to neutralize ─
+// These are the v5-style edge targets: pinned left or right side of screen
+// at a fixed vertical position, sliding in from the edge
+function SideTarget({ project, side, topPct, visible, onShot }) {
+  const [hits,  setHits]  = useState(0);
+  const [phase, setPhase] = useState('spawning');
+  const orange="#FF6A00", amber="#FFAB00", red="#FF3D00";
+  const mono="Share Tech Mono,monospace";
+
+  useEffect(() => {
+    if (!visible) return;
+    setHits(0); setPhase('spawning');
+    const t = setTimeout(() => setPhase('idle'), 80);
+    return () => clearTimeout(t);
+  }, [visible]);
+
+  const alive = phase === 'idle' || phase === 'hovered';
+
+  const handleClick = () => {
+    if (!alive) return;
+    const nh = hits + 1;
+    if (nh >= 3) {
+      setPhase('neutralized');
+      onShot(project.id);
+      setTimeout(() => setPhase('gone'), 1100);
+    } else {
+      setHits(nh);
+      setPhase('hit');
+      setTimeout(() => setPhase('idle'), 350);
+    }
+  };
+
+  if (!visible || phase === 'gone') return null;
+
+  const spawning    = phase === 'spawning';
+  const isHit       = phase === 'hit';
+  const neutralized = phase === 'neutralized';
+  const hovered     = phase === 'hovered';
+  const col = hits===0 ? orange : hits===1 ? amber : red;
+
+  // The target peeks out from the edge — partially hidden, partially visible
+  // On hover it slides fully into view
+  const PEEK = 56;  // px visible when idle
+  const FULL = 84;  // px visible when hovered
+  const SZ = 80;    // svg size
+  const offset = hovered ? -4 : 0; // slight nudge inward on hover
+
+  const isLeft = side === 'left';
+  // Slide in from edge: spawning = fully hidden off screen
+  const slideIn = spawning ? SZ : neutralized ? SZ + 20 : hovered ? FULL : PEEK;
+
+  return (
+    <div
+      onClick={handleClick}
+      onMouseEnter={() => alive && setPhase('hovered')}
+      onMouseLeave={() => phase === 'hovered' && setPhase('idle')}
+      style={{
+        position:'fixed',
+        top:`${topPct}%`,
+        [isLeft ? 'left' : 'right']: -(SZ - slideIn),
+        transform:`translateY(-50%)`,
+        opacity: spawning ? 0 : neutralized ? 0 : 1,
+        transition: spawning
+          ? 'left 0.6s cubic-bezier(0.34,1.56,0.64,1), right 0.6s cubic-bezier(0.34,1.56,0.64,1), opacity 0.4s ease'
+          : neutralized ? 'opacity 0.5s ease, left 0.4s ease, right 0.4s ease'
+          : 'left 0.22s ease, right 0.22s ease, opacity 0.2s ease',
+        zIndex:42,
+        pointerEvents: alive ? 'auto' : 'none',
+      }}
+    >
+      {/* Label tag that appears on hover, opposite side from edge */}
+      {hovered && (
+        <div style={{
+          position:'absolute',
+          top:'50%', transform:'translateY(-50%)',
+          [isLeft ? 'left' : 'right']: SZ + 6,
+          fontFamily:mono, fontSize:9, letterSpacing:2, color:orange,
+          whiteSpace:'nowrap', textShadow:'0 0 10px #FF6A00',
+          background:'rgba(4,7,2,0.9)', padding:'4px 9px',
+          border:'1px solid rgba(255,106,0,0.35)',
+          animation:'fadeUp 0.12s ease both',
+          pointerEvents:'none',
+        }}>
+          {project.title}
+        </div>
+      )}
+
+      <svg width={SZ} height={SZ} viewBox="0 0 100 100" fill="none"
+        style={{
+          display:'block',
+          filter: neutralized
+            ? 'drop-shadow(0 0 22px #FF3D00)'
+            : hovered   ? 'drop-shadow(0 0 18px #FF6A00)'
+            : isHit     ? `drop-shadow(0 0 16px ${col})`
+            : `drop-shadow(0 0 7px rgba(255,106,0,0.55))`,
+        }}>
+
+        {/* OUTER ring — dashes, spins on hover */}
+        <g style={{ transformOrigin:'50px 50px', animation: hovered ? 'squareSpin 6s linear infinite' : 'none' }}>
+          <circle cx={50} cy={50} r={47}
+            stroke={col} strokeWidth={1}
+            opacity={hits===0?0.5:0.78}
+            strokeDasharray={hits===2?"3 4":"6 5"}/>
+        </g>
+
+        {/* MIDDLE ring */}
+        <circle cx={50} cy={50} r={33}
+          stroke={col} strokeWidth={hits===2 ? 2 : 1.4}
+          opacity={0.88}/>
+
+        {/* INNER ring */}
+        <circle cx={50} cy={50} r={16}
+          stroke={col} strokeWidth={0.9}
+          opacity={0.55} strokeDasharray="2 3"/>
+
+        {/* CROSSHAIRS */}
+        <line x1={50} y1={3}  x2={50} y2={34} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+        <line x1={50} y1={66} x2={50} y2={97} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+        <line x1={3}  y1={50} x2={34} y2={50} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+        <line x1={66} y1={50} x2={97} y2={50} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+
+        {/* CENTER */}
+        <circle cx={50} cy={50} r={3.5} fill={col} opacity={0.95}/>
+
+        {/* DAMAGE CRACKS */}
+        {hits>=1 && <line x1={22} y1={18} x2={38} y2={46} stroke={amber} strokeWidth={1.4} opacity={0.78}/>}
+        {hits>=1 && <line x1={65} y1={24} x2={56} y2={44} stroke={amber} strokeWidth={1.1} opacity={0.62}/>}
+        {hits>=2 && <line x1={28} y1={60} x2={52} y2={50} stroke={red}   strokeWidth={1.7} opacity={0.88}/>}
+        {hits>=2 && <line x1={72} y1={75} x2={55} y2={60} stroke={red}   strokeWidth={1.4} opacity={0.82}/>}
+
+        {/* HIT INDICATORS — 3 small circles */}
+        {[0,1,2].map(i=>(
+          <circle key={i} cx={43+i*7} cy={92} r={2.5}
+            fill={i<hits?col:'none'} stroke={col} strokeWidth={0.9} opacity={0.85}/>
+        ))}
+
+        {/* Project num */}
+        {!hovered && !neutralized && (
+          <text x={50} y={55} textAnchor="middle" fill={col} fontSize={11}
+            fontFamily="Share Tech Mono,monospace" opacity={0.85}>{project.num}</text>
+        )}
+      </svg>
+
+      {/* Hit flash */}
+      {isHit && (
+        <div style={{ position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',pointerEvents:'none',animation:'hitRing 0.35s ease forwards' }}>
+          <svg width={130} height={130} viewBox="0 0 130 130" fill="none">
+            <circle cx={65} cy={65} r={60} stroke={col} strokeWidth={2} opacity={0.7}/>
+          </svg>
+        </div>
+      )}
+
+      {/* NEUTRALIZED stamp */}
+      {neutralized && (
+        <div style={{
+          position:'absolute', top:'50%', left:'50%',
+          transform:'translate(-50%,-50%) rotate(-8deg)',
+          fontFamily:mono, fontSize:10, letterSpacing:3,
+          color:'#FF3D00', whiteSpace:'nowrap',
+          border:'2px solid rgba(255,61,0,0.85)', padding:'5px 12px',
+          background:'rgba(4,7,2,0.97)', textShadow:'0 0 14px #FF3D00',
+          pointerEvents:'none',
+        }}>✕ NEUTRALIZED</div>
+      )}
+    </div>
+  );
+}
+
+// ── ROUND shootable project target — v5 style, 3 hits to neutralize ─
+function ProjectTarget({ project, pos, visible, onShot }) {
+  const [hits,  setHits]  = useState(0);
+  const [phase, setPhase] = useState('spawning');
+  const orange="#FF6A00", amber="#FFAB00", red="#FF3D00";
+  const mono="Share Tech Mono,monospace";
+
+  useEffect(() => {
+    if (!visible) return;
+    setHits(0); setPhase('spawning');
+    const t = setTimeout(() => setPhase('idle'), 60);
+    return () => clearTimeout(t);
+  }, [visible, pos.x, pos.y]);
+
+  const alive = phase === 'idle' || phase === 'hovered';
+
+  const handleClick = () => {
+    if (!alive) return;
+    const nh = hits + 1;
+    if (nh >= 3) {
+      setPhase('neutralized');
+      onShot(project.id);
+      setTimeout(() => setPhase('gone'), 1000);
+    } else {
+      setHits(nh);
+      setPhase('hit');
+      setTimeout(() => setPhase('idle'), 350);
+    }
+  };
+
+  if (!visible || phase === 'gone') return null;
+
+  const spawning    = phase === 'spawning';
+  const isHit       = phase === 'hit';
+  const neutralized = phase === 'neutralized';
+  const hovered     = phase === 'hovered';
+  const col = hits === 0 ? orange : hits === 1 ? amber : red;
+  const SZ  = hovered ? 96 : isHit ? 82 : 72;
+
+  return (
+    <div
+      onClick={handleClick}
+      onMouseEnter={() => alive && setPhase('hovered')}
+      onMouseLeave={() => phase === 'hovered' && setPhase('idle')}
+      style={{
+        position:'fixed', left:pos.x, top:pos.y,
+        transform:`translate(-50%,-50%) scale(${spawning ? 0.05 : neutralized ? 1.8 : 1})`,
+        opacity: spawning ? 0 : neutralized ? 0 : 1,
+        transition: spawning
+          ? 'transform 0.5s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s ease'
+          : neutralized ? 'transform 0.7s ease, opacity 0.6s ease'
+          : isHit       ? 'transform 0.07s ease'
+          : 'transform 0.18s ease',
+        zIndex:40, pointerEvents: alive ? 'auto' : 'none',
+      }}
+    >
+      <svg width={SZ} height={SZ} viewBox="0 0 90 90" fill="none"
+        style={{
+          display:'block',
+          transition:'width 0.14s ease, height 0.14s ease',
+          filter: neutralized
+            ? 'drop-shadow(0 0 22px #FF3D00) drop-shadow(0 0 10px #FF6A00)'
+            : hovered   ? 'drop-shadow(0 0 22px #FF6A00) drop-shadow(0 0 10px #FF6A00)'
+            : isHit     ? `drop-shadow(0 0 18px ${col})`
+            : `drop-shadow(0 0 8px rgba(255,106,0,0.6))`,
+        }}>
+
+        {/* OUTER ring — dashed, spins on hover */}
+        <g style={{ transformOrigin:'45px 45px', animation: hovered ? 'squareSpin 6s linear infinite' : 'none' }}>
+          <circle cx={45} cy={45} r={43}
+            stroke={col} strokeWidth={1}
+            opacity={hits===0 ? 0.5 : 0.75}
+            strokeDasharray={hits===2 ? "3 4" : "6 5"}/>
+        </g>
+
+        {/* MIDDLE ring */}
+        <circle cx={45} cy={45} r={30}
+          stroke={col} strokeWidth={hits===2 ? 2 : 1.4}
+          opacity={0.9}/>
+
+        {/* INNER ring */}
+        <circle cx={45} cy={45} r={14}
+          stroke={col} strokeWidth={0.9}
+          opacity={0.6} strokeDasharray="2 3"/>
+
+        {/* CROSSHAIRS — 4 lines with gap at center */}
+        <line x1={45} y1={2}  x2={45} y2={31} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+        <line x1={45} y1={59} x2={45} y2={88} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+        <line x1={2}  y1={45} x2={31} y2={45} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+        <line x1={59} y1={45} x2={88} y2={45} stroke={col} strokeWidth={1.4} opacity={0.9}/>
+
+        {/* Diagonal tick marks at 45° */}
+        {!hovered && [45,135,225,315].map((deg,i)=>{
+          const rad = deg*Math.PI/180;
+          const x1=45+Math.cos(rad)*36, y1=45+Math.sin(rad)*36;
+          const x2=45+Math.cos(rad)*42, y2=45+Math.sin(rad)*42;
+          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={col} strokeWidth={1} opacity={0.45}/>;
+        })}
+
+        {/* CENTER dot */}
+        <circle cx={45} cy={45} r={3} fill={col} opacity={0.95}/>
+        <circle cx={45} cy={45} r={1.2} fill="rgba(255,255,255,0.6)" opacity={0.7}/>
+
+        {/* DAMAGE — crack lines at hits */}
+        {hits>=1 && <line x1={20} y1={16} x2={40} y2={44} stroke={amber} strokeWidth={1.5} opacity={0.8}/>}
+        {hits>=1 && <line x1={62} y1={22} x2={52} y2={43} stroke={amber} strokeWidth={1.2} opacity={0.65}/>}
+        {hits>=2 && <line x1={24} y1={58} x2={44} y2={47} stroke={red}   strokeWidth={1.8} opacity={0.9}/>}
+        {hits>=2 && <line x1={70} y1={68} x2={52} y2={55} stroke={red}   strokeWidth={1.5} opacity={0.85}/>}
+        {hits>=2 && <line x1={14} y1={70} x2={38} y2={60} stroke={red}   strokeWidth={1.1} opacity={0.75}/>}
+
+        {/* HIT DOTS — 3 small circles at bottom */}
+        {[0,1,2].map(i=>(
+          <circle key={i} cx={38+i*7} cy={83} r={2.5}
+            fill={i<hits ? col : 'none'} stroke={col} strokeWidth={0.9} opacity={0.85}/>
+        ))}
+
+        {/* PROJECT NUM */}
+        {!hovered && !neutralized && (
+          <text x={45} y={50} textAnchor="middle" fill={col} fontSize={10}
+            fontFamily="Share Tech Mono,monospace" opacity={0.9}>{project.num}</text>
+        )}
+      </svg>
+
+      {/* Hover label */}
+      {hovered && (
+        <div style={{
+          position:'absolute', bottom:'115%', left:'50%', transform:'translateX(-50%)',
+          fontFamily:mono, fontSize:10, letterSpacing:2, color:orange,
+          whiteSpace:'nowrap', textShadow:'0 0 12px #FF6A00',
+          animation:'fadeUp 0.12s ease both', pointerEvents:'none',
+          background:'rgba(4,7,2,0.9)', padding:'4px 10px',
+          border:'1px solid rgba(255,106,0,0.35)',
+        }}>
+          {project.title}
+          <div style={{ width:1, height:7, background:'rgba(255,106,0,0.4)', margin:'3px auto 0' }}/>
+        </div>
+      )}
+
+      {/* Hit flash — expanding ring */}
+      {isHit && (
+        <div style={{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', pointerEvents:'none', animation:'hitRing 0.35s ease forwards' }}>
+          <svg width={140} height={140} viewBox="0 0 140 140" fill="none">
+            <circle cx={70} cy={70} r={65} stroke={col} strokeWidth={2} opacity={0.7}/>
+          </svg>
+        </div>
+      )}
+
+      {/* NEUTRALIZED stamp */}
+      {neutralized && (
+        <div style={{
+          position:'absolute', top:'50%', left:'50%',
+          transform:'translate(-50%,-50%) rotate(-8deg)',
+          fontFamily:mono, fontSize:11, letterSpacing:3,
+          color:'#FF3D00', whiteSpace:'nowrap',
+          border:'2px solid rgba(255,61,0,0.85)', padding:'6px 14px',
+          background:'rgba(4,7,2,0.97)', textShadow:'0 0 14px #FF3D00',
+          pointerEvents:'none',
+        }}>✕ NEUTRALIZED</div>
+      )}
+    </div>
+  );
+}
+
+// ── Project modal ────────────────────────────────────────────────────
+function ProjectModal({ project, onClose }) {
+  const mono="Share Tech Mono,monospace", display="Bebas Neue,sans-serif", body="DM Sans,sans-serif";
+  const orange="#FF6A00", text="#E8DFC8", muted="rgba(232,223,200,0.45)";
+  const [vis, setVis] = useState(false);
+  useEffect(()=>{ setTimeout(()=>setVis(true), 30); },[]);
+  const close = () => { setVis(false); setTimeout(onClose, 320); };
+  return (
+    <div onClick={close} style={{ position:'fixed',inset:0,zIndex:800,background:'rgba(0,0,0,0.85)',backdropFilter:'blur(6px)',display:'flex',alignItems:'center',justifyContent:'center',opacity:vis?1:0,transition:'opacity 0.3s ease' }}>
+      <div onClick={e=>e.stopPropagation()} style={{ width:'min(680px,90vw)',border:'1px solid rgba(255,106,0,0.45)',background:'rgba(4,7,2,0.97)',boxShadow:'0 0 80px rgba(255,106,0,0.2)',overflow:'hidden',position:'relative',transform:vis?'translateY(0) scale(1)':'translateY(32px) scale(0.96)',transition:'transform 0.4s cubic-bezier(0.34,1.56,0.64,1)' }}>
+        {/* Corner brackets */}
+        {[{top:0,left:0},{top:0,right:0},{bottom:0,left:0},{bottom:0,right:0}].map((pos,i)=>{
+          const isRight=i===1||i===3, isBottom=i>=2;
+          return <div key={i} style={{ position:'absolute',width:20,height:20,pointerEvents:'none',zIndex:2,...pos,
+            borderTop:!isBottom?'2px solid #FF6A00':undefined,
+            borderBottom:isBottom?'2px solid #FF6A00':undefined,
+            borderLeft:!isRight?'2px solid #FF6A00':undefined,
+            borderRight:isRight?'2px solid #FF6A00':undefined,
+          }}/>;
+        })}
+        <div style={{ borderBottom:'1px solid rgba(255,106,0,0.18)',padding:'14px 24px',display:'flex',justifyContent:'space-between',alignItems:'center' }}>
+          <span style={{ fontFamily:mono,fontSize:10,letterSpacing:3,color:orange }}>FILE DECLASSIFIED — PROJECT {project.num}</span>
+          <button onClick={close} style={{ background:'none',border:'1px solid rgba(255,106,0,0.35)',color:orange,fontFamily:mono,fontSize:10,letterSpacing:2,padding:'4px 12px',cursor:'none' }}>✕ CLOSE</button>
+        </div>
+        <div style={{ height:project.image?200:90,overflow:'hidden',position:'relative',background:'rgba(3,6,2,0.98)',display:'flex',alignItems:'center',justifyContent:'center' }}>
+          {project.image
+            ? <><img src={project.image} alt={project.title} style={{ width:'100%',height:'100%',objectFit:'cover',opacity:0.85,filter:'saturate(0.7) contrast(1.1)' }}/><div style={{ position:'absolute',inset:0,background:'linear-gradient(to top,rgba(4,7,2,0.8),transparent)' }}/></>
+            : <><div style={{ position:'absolute',inset:0,backgroundImage:'linear-gradient(rgba(255,106,0,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,106,0,0.04) 1px,transparent 1px)',backgroundSize:'18px 18px' }}/><span style={{ fontFamily:mono,fontSize:9,letterSpacing:3,color:'rgba(255,106,0,0.22)',position:'relative' }}>image: "/yourfile.jpg" in App.jsx</span></>
+          }
+        </div>
+        <div style={{ padding:'28px 32px' }}>
+          <div style={{ fontFamily:display,fontSize:36,letterSpacing:4,color:text,marginBottom:12,lineHeight:1 }}>{project.title}</div>
+          <p style={{ fontFamily:body,fontSize:14,lineHeight:1.9,color:muted,fontWeight:300,marginBottom:22 }}>{project.desc}</p>
+          <div style={{ display:'flex',flexWrap:'wrap',gap:8,marginBottom:24 }}>
+            {project.stack.map(t=><span key={t} style={{ fontFamily:mono,fontSize:9,letterSpacing:1.5,padding:'4px 11px',border:'1px solid rgba(255,106,0,0.28)',color:muted,background:'rgba(255,106,0,0.04)' }}>{t}</span>)}
+          </div>
+          {project.link && <a href={project.link} target="_blank" rel="noreferrer"
+            style={{ fontFamily:mono,fontSize:10,letterSpacing:3,color:orange,textDecoration:'none',border:'1px solid rgba(255,106,0,0.4)',padding:'11px 22px',display:'inline-block',transition:'background 0.2s' }}
+            onMouseEnter={e=>e.currentTarget.style.background='rgba(255,106,0,0.1)'}
+            onMouseLeave={e=>e.currentTarget.style.background='transparent'}>VIEW PROJECT ——▸</a>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── HUD ──────────────────────────────────────────────────────────────
+function HUD({ shots }) {
+  return (
+    <div style={{ display:"flex",flexDirection:"column",gap:5 }}>
+      {[["SYS.STATUS","ONLINE"],["CLEARANCE","LEVEL-1"],["SIGNAL","STRONG"],["OPERATOR","4MINE"],["TARGETS HIT",String(shots).padStart(3,"0")],["MODE","LIVE"]].map(([k,v])=>(
+        <div key={k} style={{ fontFamily:"Share Tech Mono,monospace",fontSize:9,letterSpacing:2,color:"rgba(255,106,0,0.38)",display:"flex",gap:14 }}>
+          <span style={{ minWidth:100 }}>{k}</span><span style={{ color:"rgba(255,106,0,0.65)" }}>{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Section({id,children,dark}){return<section id={id} style={{position:"relative",zIndex:2,padding:"100px 60px",background:dark?"rgba(3,6,2,0.85)":"transparent"}}>{children}</section>;}
+function SectionHeader({num,title}){return(<div style={{display:"flex",alignItems:"baseline",gap:20,marginBottom:52}}><span style={{fontFamily:"Share Tech Mono,monospace",fontSize:11,letterSpacing:3,color:"#FF6A00"}}>{num}</span><h2 style={{fontFamily:"Bebas Neue,sans-serif",fontSize:"clamp(38px,6vw,68px)",letterSpacing:5,color:"#E8DFC8",margin:0,textShadow:"0 0 40px rgba(255,106,0,0.18)"}}>{title}</h2><div style={{flex:1,height:1,background:"linear-gradient(90deg,rgba(255,106,0,0.4),transparent)"}}/></div>);}
+function Divider(){return<div style={{height:1,margin:"0 60px",position:"relative",zIndex:2,background:"linear-gradient(90deg,#FF6A00,rgba(255,106,0,0.1),transparent)"}}/>;}
+function Tag({children}){return<span style={{fontFamily:"Share Tech Mono,monospace",fontSize:9,letterSpacing:1.5,padding:"5px 12px",border:"1px solid rgba(255,106,0,0.28)",color:"rgba(232,223,200,0.45)",background:"rgba(255,106,0,0.04)"}}>{children}</span>;}
+
+function genPositions(count, existing = []) {
+  const minDist=150, margin=90, result=[...existing];
+  const W=window.innerWidth, H=window.innerHeight;
+  let attempts=0;
+  while(result.length < existing.length+count && attempts<2000){
+    attempts++;
+    const x=margin+Math.random()*(W-margin*2), y=margin+Math.random()*(H-margin*2);
+    if(!result.some(p=>Math.hypot(p.x-x,p.y-y)<minDist)) result.push({x,y});
+  }
+  return result.slice(existing.length);
+}
+
+// BG targets only in side margins — left 12% or right 12% of screen, never over center text
+function genBgPositions(count, existing = []) {
+  const minDist=120, result=[...existing];
+  const W=window.innerWidth, H=window.innerHeight;
+  const sideW = Math.max(W * 0.12, 60); // width of each side zone
+  let attempts=0;
+  while(result.length < existing.length+count && attempts<3000){
+    attempts++;
+    // Randomly pick left side or right side
+    let x;
+    if(Math.random() < 0.5) x = 20 + Math.random() * sideW;           // left margin
+    else                     x = W - 20 - Math.random() * sideW;       // right margin
+    const y = 80 + Math.random() * (H - 120);
+    if(!result.some(p=>Math.hypot(p.x-x,p.y-y)<minDist)) result.push({x,y});
+  }
+  return result.slice(existing.length);
+}
+
+// ── App ──────────────────────────────────────────────────────────────
+export default function App() {
+  const [revealed,  setRevealed]  = useState(false);
+  const [scanY,     setScanY]     = useState(0);
+  const [shots,     setShots]     = useState(0);
+  const [bullets,   setBullets]   = useState([]);
+  const [modal,     setModal]     = useState(null);
+  const [tState,    setTState]    = useState({});
+  const [bgTargets, setBgTargets] = useState([]);
+  const [sideState, setSideState] = useState({});
+  const bulletId = useRef(0);
+
+  // ── EDIT YOUR PROJECTS HERE ───────────────────────────────────────
+  const projects = [
+    { id:'p1', num:'001', title:"YOUR BEST PROJECT",
+      desc:"Replace with your most impressive build. What did it do? What problem did it solve? Lead with impact.",
+      stack:["React","Node.js","PostgreSQL"], link:"https://github.com/", image:null },
+    { id:'p2', num:'002', title:"PROJECT TWO",
+      desc:"Second project. What did you build? What did you learn? Even a side project shows initiative.",
+      stack:["Python","Flask","SQLite"], link:"https://github.com/", image:null },
+    { id:'p3', num:'003', title:"PROJECT THREE",
+      desc:"CLI tool, script, fun experiment — anything you shipped. Show it.",
+      stack:["TypeScript","API"], link:"https://github.com/", image:null },
+  ];
+
+  // Side edge targets
+  const sideTargets = [
+    { ...projects[0], sid:'s1', side:'left',  topPct:28 },
+    { ...projects[1], sid:'s2', side:'right', topPct:52 },
+    { ...projects[2], sid:'s3', side:'left',  topPct:74 },
+  ];
+
+  useEffect(()=>{
+    const pp = genPositions(projects.length);
+    const s = {};
+    projects.forEach((p,i) => { s[p.id] = { pos:pp[i], visible:true }; });
+    setTState(s);
+    setBgTargets(genBgPositions(8));
+    const ss = {}; [{sid:'s1'},{sid:'s2'},{sid:'s3'}].forEach(st => { ss[st.sid] = true; });
+    setTimeout(()=>setSideState(ss), 900);
+    setTimeout(()=>setRevealed(true), 300);
+  },[]);
+
+  useEffect(()=>{
+    let f, y=0;
+    const t = () => { y=(y+0.18)%100; setScanY(y); f=requestAnimationFrame(t); };
+    f = requestAnimationFrame(t);
+    return () => cancelAnimationFrame(f);
+  },[]);
+
+  useEffect(()=>{
+    const h = e => { const id=bulletId.current++; setBullets(b=>[...b,{id,x:e.clientX,y:e.clientY}]); };
+    window.addEventListener('click', h);
+    return () => window.removeEventListener('click', h);
+  },[]);
+  const killBullet = useCallback(id => setBullets(b=>b.filter(x=>x.id!==id)), []);
+
+  // Side target shot handler — hides, shows modal, respawns
+  const handleSideShot = useCallback(sid => {
+    setShots(n=>n+1);
+    const st = [{sid:'s1',id:'p1'},{sid:'s2',id:'p2'},{sid:'s3',id:'p3'}].find(x=>x.sid===sid);
+    const proj = projects.find(p=>p.id===st.id);
+    setSideState(prev => ({...prev,[sid]:false}));
+    setTimeout(()=>setModal(proj), 500);
+    setTimeout(()=>setSideState(prev => ({...prev,[sid]:true})), 3000);
+  },[]);
+
+  const handleShot = useCallback(pid => {
+    setShots(n=>n+1);
+    const proj = projects.find(p=>p.id===pid);
+    setTState(prev => ({...prev,[pid]:{...prev[pid],visible:false}}));
+    setTimeout(()=>setModal(proj), 500);
+    setTimeout(()=>{
+      setTState(prev => {
+        const occ = Object.entries(prev).filter(([k,v])=>k!==pid&&v.visible).map(([,v])=>v.pos);
+        const [np] = genPositions(1, occ);
+        return { ...prev, [pid]: { pos:np||{x:130+Math.random()*(window.innerWidth-260),y:110+Math.random()*(window.innerHeight-220)}, visible:true } };
+      });
+    }, 2800);
+  },[]);
+
+  const mono="Share Tech Mono,monospace", display="Bebas Neue,sans-serif", body="DM Sans,sans-serif";
+  const orange="#FF6A00", text="#E8DFC8", muted="rgba(232,223,200,0.45)";
+  const skills=[
+    {cat:"Frontend", name:"INTERFACES", tags:["React","HTML","CSS","JavaScript","TypeScript"]},
+    {cat:"Backend",  name:"SYSTEMS",    tags:["Node.js","Python","REST APIs","SQL","Java"]},
+    {cat:"Tooling",  name:"WORKFLOW",   tags:["Git","Linux","Docker","VS Code","CI/CD"]},
+  ];
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Bebas+Neue&family=DM+Sans:wght@300;400&display=swap');
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+        html{scroll-behavior:smooth;}
+        body{background:#040703;overflow-x:hidden;cursor:none!important;}
+        *{cursor:none!important;}
+        ::-webkit-scrollbar{width:3px;} ::-webkit-scrollbar-track{background:#040703;} ::-webkit-scrollbar-thumb{background:#FF6A00;}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.15}}
+        @keyframes glowPulse{0%,100%{text-shadow:0 0 20px rgba(255,106,0,0.25)}50%{text-shadow:0 0 60px rgba(255,106,0,0.6),0 0 100px rgba(255,106,0,0.15)}}
+        @keyframes squareSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+        @keyframes tFloat{0%,100%{transform:translateY(0px)}50%{transform:translateY(-9px)}}
+        @keyframes hitSquare{0%{transform:translate(-50%,-50%) scale(0.5);opacity:0.9}100%{transform:translate(-50%,-50%) scale(1.7);opacity:0}}
+        @keyframes hitRing{0%{transform:translate(-50%,-50%) scale(0.5);opacity:0.9}100%{transform:translate(-50%,-50%) scale(1.7);opacity:0}}
+        .nav-link{font-family:Share Tech Mono,monospace;font-size:11px;letter-spacing:3px;color:rgba(232,223,200,0.4);text-decoration:none;text-transform:uppercase;transition:all 0.2s;position:relative;}
+        .nav-link::after{content:'';position:absolute;left:0;bottom:-3px;width:0;height:1px;background:#FF6A00;transition:width 0.2s;}
+        .nav-link:hover{color:#FF6A00;}.nav-link:hover::after{width:100%;}
+        .skill-card{border:1px solid rgba(255,106,0,0.18);padding:32px 26px;background:rgba(4,7,2,0.9);transition:all 0.35s ease;position:relative;overflow:hidden;}
+        .skill-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#FF6A00,transparent);transform:scaleX(0);transition:transform 0.4s ease;}
+        .skill-card:hover{border-color:rgba(255,106,0,0.6);background:rgba(255,106,0,0.05);transform:translateY(-6px);box-shadow:0 14px 44px rgba(0,0,0,0.55);}
+        .skill-card:hover::before{transform:scaleX(1);}
+        .contact-row{display:flex;align-items:center;justify-content:space-between;padding:20px 22px;border:1px solid rgba(255,106,0,0.18);background:rgba(4,7,2,0.9);text-decoration:none;transition:all 0.25s;position:relative;overflow:hidden;}
+        .contact-row::before{content:'';position:absolute;left:-100%;top:0;bottom:0;width:100%;background:linear-gradient(90deg,transparent,rgba(255,106,0,0.06),transparent);transition:left 0.4s ease;}
+        .contact-row:hover{border-color:#FF6A00;padding-left:32px;}.contact-row:hover::before{left:100%;}
+        .btn-primary{font-family:Share Tech Mono,monospace;font-size:11px;letter-spacing:3px;text-transform:uppercase;padding:16px 36px;background:#FF6A00;color:#040703;border:none;text-decoration:none;font-weight:bold;transition:all 0.2s;display:inline-block;}
+        .btn-primary:hover{background:#FF8C00;transform:translateY(-3px);box-shadow:0 6px 32px rgba(255,106,0,0.5);}
+        .btn-outline{font-family:Share Tech Mono,monospace;font-size:11px;letter-spacing:3px;text-transform:uppercase;padding:16px 36px;background:transparent;color:#FF6A00;border:1px solid #FF6A00;text-decoration:none;display:inline-block;transition:all 0.2s;}
+        .btn-outline:hover{background:rgba(255,106,0,0.1);transform:translateY(-3px);}
+        .stat-card{border:1px solid rgba(255,106,0,0.18);padding:26px 22px;background:rgba(3,6,2,0.95);position:relative;overflow:hidden;transition:all 0.25s;}
+        .stat-bar{position:absolute;top:0;left:0;width:3px;height:0;background:linear-gradient(180deg,#FF6A00,#FF3D00);transition:height 0.45s ease;}
+        .stat-card:hover{border-color:rgba(255,106,0,0.5);}.stat-card:hover .stat-bar{height:100%!important;}
+        input,textarea{width:100%;background:rgba(4,7,2,0.95);border:1px solid rgba(255,106,0,0.2);color:#E8DFC8;font-family:Share Tech Mono,monospace;font-size:13px;padding:14px 18px;outline:none;transition:all 0.2s;resize:none;}
+        input:focus,textarea:focus{border-color:#FF6A00;box-shadow:0 0 18px rgba(255,106,0,0.12);}
+        input::placeholder,textarea::placeholder{color:rgba(232,223,200,0.2);}
+        @media(max-width:900px){nav{padding:14px 24px!important;}.nav-desktop{display:none!important;}section{padding:80px 24px!important;}.about-grid,.contact-grid{grid-template-columns:1fr!important;gap:40px!important;}.skills-grid{grid-template-columns:1fr 1fr!important;}.hud-corner{display:none!important;}.tfloat{display:none!important;}}
+      `}</style>
+
+      {/* ── ZOOM ROOT — scales 2x on right-hold ── */}
+      <div id="zoom-root" style={{ willChange:'transform' }}>
+
+        {/* Background */}
+        <div style={{ position:"fixed",inset:0,zIndex:0,background:"#040703" }}/>
+        <div style={{ position:"fixed",inset:0,zIndex:0,pointerEvents:"none",
+          background:"radial-gradient(ellipse 60% 45% at 20% 30%,rgba(24,32,10,0.7),transparent),radial-gradient(ellipse 50% 40% at 80% 70%,rgba(18,26,8,0.65),transparent)" }}/>
+        <svg style={{ position:"fixed",inset:0,zIndex:0,pointerEvents:"none",opacity:0.055,width:"100%",height:"100%" }}>
+          <defs>
+            <pattern id="hexgrid" x="0" y="0" width="52" height="60" patternUnits="userSpaceOnUse">
+              <polygon points="26,1 51,15 51,45 26,59 1,45 1,15" fill="none" stroke="#FF6A00" strokeWidth="0.6"/>
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#hexgrid)"/>
+        </svg>
+        <div style={{ position:"fixed",inset:0,zIndex:0,pointerEvents:"none",opacity:0.022,
+          backgroundImage:"linear-gradient(rgba(255,106,0,1) 1px,transparent 1px),linear-gradient(90deg,rgba(255,106,0,1) 1px,transparent 1px)",
+          backgroundSize:"22px 22px" }}/>
+        <div style={{ position:"fixed",inset:0,zIndex:1,pointerEvents:"none",
+          background:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.06) 2px,rgba(0,0,0,0.06) 4px)" }}/>
+        <div style={{ position:"fixed",inset:0,zIndex:1,pointerEvents:"none",
+          background:"radial-gradient(ellipse at center,transparent 40%,rgba(0,0,0,0.75) 100%)" }}/>
+        <div style={{ position:"fixed",left:0,right:0,top:`${scanY}%`,height:2,zIndex:2,pointerEvents:"none",
+          background:"linear-gradient(90deg,transparent,rgba(255,106,0,0.1),transparent)",transition:"top 0.016s linear" }}/>
+
+        {/* Round decorative BG targets */}
+        {bgTargets.map((pos,i) => <BgTarget key={i} pos={pos} delay={i*120+400} seed={i*7+3}/>)}
+
+        {/* Square shootable project targets — floating */}
+        {projects.map(p => {
+          const ts = tState[p.id]; if (!ts) return null;
+          return (
+            <div key={p.id} className="tfloat" style={{ animation:`tFloat ${3.2+p.id.charCodeAt(1)*0.28}s ease-in-out infinite`, animationDelay:`${p.id.charCodeAt(1)*200}ms` }}>
+              <ProjectTarget project={p} pos={ts.pos} visible={ts.visible} onShot={handleShot}/>
+            </div>
+          );
+        })}
+
+        {/* Square side-edge targets — peek from left/right, same 3 projects */}
+        {sideTargets.map(st => (
+          <SideTarget key={st.sid}
+            project={st} side={st.side} topPct={st.topPct}
+            visible={!!sideState[st.sid]}
+            onShot={()=>handleSideShot(st.sid)}
+          />
+        ))}
+
+        {/* NAV */}
+        <nav style={{ position:"fixed",top:0,left:0,right:0,zIndex:200,display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 60px",borderBottom:"1px solid rgba(255,106,0,0.15)",background:"rgba(2,4,1,0.96)",backdropFilter:"blur(20px)" }}>
+          <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+            <Logo size={28} color={orange}/>
+            <span style={{ fontFamily:display,fontSize:21,letterSpacing:3,color:text }}>MINE</span>
+          </div>
+          <ul className="nav-desktop" style={{ display:"flex",gap:36,listStyle:"none" }}>
+            {["about","skills","projects","contact"].map(s=>(
+              <li key={s}><a href={`#${s}`} className="nav-link">◈ {s}</a></li>
+            ))}
+          </ul>
+          <div style={{ display:"flex",alignItems:"center",gap:16 }}>
+            <div style={{ fontFamily:mono,fontSize:10,letterSpacing:2,color:"rgba(255,106,0,0.5)" }}>
+              TARGETS HIT: {String(shots).padStart(3,"0")} · HOLD RMB: 2× ZOOM
+            </div>
+            <div style={{ fontFamily:mono,fontSize:10,letterSpacing:2,color:"#FFAB00",display:"flex",alignItems:"center",gap:7 }}>
+              <div style={{ width:6,height:6,borderRadius:"50%",background:"#FFAB00",animation:"pulse 2s infinite" }}/>
+              AVAILABLE FOR HIRE
+            </div>
+          </div>
+        </nav>
+
+        {/* HERO */}
+        <section id="hero" style={{ minHeight:"100vh",display:"flex",flexDirection:"column",justifyContent:"center",padding:"120px 60px 80px",position:"relative",zIndex:2 }}>
+          <div className="hud-corner" style={{ position:"absolute",top:90,right:60 }}><HUD shots={shots}/></div>
+          <div style={{ position:"relative",zIndex:2 }}>
+            <div style={{ fontFamily:mono,fontSize:11,letterSpacing:4,color:orange,marginBottom:28,opacity:revealed?1:0,animation:revealed?"fadeUp 0.6s ease 0.2s both":"none" }}>◈ FILE #0047 — SUBJECT PROFILE — CLEARANCE: OPEN</div>
+            <div style={{ display:"flex",alignItems:"flex-end",marginBottom:10,opacity:revealed?1:0,animation:revealed?"fadeUp 0.8s ease 0.4s both":"none" }}>
+              <Logo size={170} color={orange}/>
+              <span style={{ fontFamily:display,fontSize:"clamp(86px,16vw,190px)",lineHeight:0.88,letterSpacing:8,color:text,marginLeft:6,animation:"glowPulse 4s ease infinite" }}>MINE</span>
+            </div>
+            <div style={{ fontFamily:display,fontSize:"clamp(18px,3.5vw,46px)",letterSpacing:7,color:muted,marginBottom:44,opacity:revealed?1:0,animation:revealed?"fadeUp 0.8s ease 0.6s both":"none" }}>Software Engineer</div>
+            <p style={{ maxWidth:520,fontSize:15,lineHeight:1.95,color:muted,fontWeight:300,fontFamily:body,marginBottom:52,borderLeft:`2px solid ${orange}`,paddingLeft:22,opacity:revealed?1:0,animation:revealed?"fadeUp 0.8s ease 0.8s both":"none" }}>
+              Degree in Software Engineering. Bold, experimental, built to disrupt. I write code that works and build systems that don't look like everything else. Currently undeployed — but not for long.
+            </p>
+            <div style={{ display:"flex",gap:16,flexWrap:"wrap",opacity:revealed?1:0,animation:revealed?"fadeUp 0.8s ease 1s both":"none" }}>
+              <a href="#about" className="btn-primary">▸ ENTER DOSSIER</a>
+              <a href="#contact" className="btn-outline">◈ MAKE CONTACT</a>
+            </div>
+          </div>
+          <div style={{ position:"absolute",bottom:32,left:60,right:60,display:"flex",justifyContent:"space-between",fontFamily:mono,fontSize:9,letterSpacing:2,color:"rgba(255,106,0,0.22)",borderTop:"1px solid rgba(255,106,0,0.1)",paddingTop:12,zIndex:2 }}>
+            <span>SHOOT SQUARE TARGETS × 3 TO VIEW PROJECTS · HOLD RIGHT-CLICK: 2× SCOPE ZOOM</span>
+            <span>SUBJECT-4MINE · REF-2025-SE</span>
+          </div>
+        </section>
+
+        <Divider/>
+
+        {/* ABOUT */}
+        <Section id="about">
+          <SectionHeader num="◈ 01" title="DOSSIER"/>
+          <div className="about-grid" style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:72,alignItems:"start" }}>
+            <div style={{ fontFamily:body,fontSize:15,lineHeight:2.05,color:muted,fontWeight:300 }}>
+              <p><strong style={{ color:text,fontWeight:400 }}>4MINE</strong> is a software engineering graduate with a sharp eye for systems, structure, and code that actually ships. The degree is done. The skills are real. The right opportunity hasn't arrived yet — but it will.</p>
+              <p style={{ marginTop:22 }}>Experimental by nature, methodical by training. Whether architecting a backend, building a frontend from scratch, or solving a problem nobody else thought to look at — the approach is always the same: <strong style={{ color:text,fontWeight:400 }}>go further than expected.</strong></p>
+              <p style={{ marginTop:22 }}>Available. Ambitious. Ready to deploy.</p>
+              <div style={{ marginTop:32,padding:"16px 20px",border:"1px solid rgba(255,106,0,0.18)",background:"rgba(255,106,0,0.03)",fontFamily:mono,fontSize:10,letterSpacing:2,color:"rgba(255,106,0,0.6)",lineHeight:2.2 }}>▸ STATUS: SEEKING DEPLOYMENT<br/>▸ FIELD: SOFTWARE ENGINEERING<br/>▸ CLEARANCE: OPEN</div>
+            </div>
+            <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:2 }}>
+              {[["SE","Degree Field"],["∞","Problems Solved"],["01","Status: Ready"],["4M","Identity Code"]].map(([val,lbl])=>(
+                <div key={lbl} className="stat-card">
+                  <div className="stat-bar"/>
+                  <div style={{ fontFamily:display,fontSize:52,color:orange,letterSpacing:2,lineHeight:1,marginBottom:8,textShadow:`0 0 20px ${orange}44` }}>{val}</div>
+                  <div style={{ fontFamily:mono,fontSize:10,letterSpacing:2,color:muted,textTransform:"uppercase" }}>{lbl}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Section>
+
+        <Divider/>
+
+        {/* SKILLS */}
+        <Section id="skills" dark>
+          <SectionHeader num="◈ 02" title="CAPABILITIES"/>
+          <div className="skills-grid" style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:2 }}>
+            {skills.map(s=>(
+              <div key={s.name} className="skill-card">
+                <div style={{ fontFamily:mono,fontSize:9,letterSpacing:3,color:orange,textTransform:"uppercase",marginBottom:14 }}>{s.cat}</div>
+                <div style={{ fontFamily:display,fontSize:30,letterSpacing:3,color:text,marginBottom:14 }}>{s.name}</div>
+                <div style={{ display:"flex",flexWrap:"wrap",gap:7 }}>{s.tags.map(t=><Tag key={t}>{t}</Tag>)}</div>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        <Divider/>
+
+        {/* PROJECTS */}
+        <Section id="projects">
+          <SectionHeader num="◈ 03" title="OPERATIONS"/>
+          <p style={{ fontFamily:mono,fontSize:11,letterSpacing:2,color:"rgba(255,106,0,0.4)",marginBottom:36,borderLeft:"2px solid rgba(255,106,0,0.25)",paddingLeft:16 }}>
+            ◈ SHOOT THE FLOATING SQUARE TARGETS 3× TO NEUTRALIZE — OR BROWSE BELOW
+          </p>
+          <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:2 }}>
+            <div style={{ gridColumn:"span 2",display:"grid",gridTemplateColumns:"1fr 1fr",gap:0,border:"1px solid rgba(255,106,0,0.18)",background:"rgba(3,6,2,0.95)",position:"relative",overflow:"hidden",transition:"all 0.35s ease" }}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor="rgba(255,106,0,0.55)";e.currentTarget.style.transform="translateY(-4px)";e.currentTarget.style.boxShadow="0 18px 52px rgba(0,0,0,0.6)";}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor="rgba(255,106,0,0.18)";e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="none";}}>
+              <div style={{ position:"absolute",top:0,left:0,width:3,height:"100%",background:"linear-gradient(180deg,#FF6A00,#FF3D00)",opacity:0.7 }}/>
+              <div style={{ padding:"38px 34px" }}>
+                <div style={{ fontFamily:mono,fontSize:10,letterSpacing:3,color:"rgba(255,106,0,0.4)",marginBottom:16 }}>PROJECT — {projects[0].num} · FEATURED</div>
+                <div style={{ fontFamily:display,fontSize:38,letterSpacing:3,color:text,marginBottom:12,lineHeight:1.05 }}>{projects[0].title}</div>
+                <p style={{ fontFamily:body,fontSize:13,lineHeight:1.85,color:muted,fontWeight:300,marginBottom:22 }}>{projects[0].desc}</p>
+                <div style={{ display:"flex",flexWrap:"wrap",gap:7,marginBottom:24 }}>{projects[0].stack.map(t=><Tag key={t}>{t}</Tag>)}</div>
+                {projects[0].link&&<a href={projects[0].link} target="_blank" rel="noreferrer" style={{ fontFamily:mono,fontSize:10,letterSpacing:3,color:orange,textDecoration:"none" }}>VIEW PROJECT ——▸</a>}
+              </div>
+              <div style={{ position:"relative",overflow:"hidden",minHeight:220,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(3,6,2,0.98)" }}>
+                {projects[0].image
+                  ? <img src={projects[0].image} alt="" style={{ width:"100%",height:"100%",objectFit:"cover",opacity:0.85,filter:"saturate(0.7) contrast(1.1)",position:"absolute",inset:0 }}/>
+                  : <><div style={{ position:"absolute",inset:0,backgroundImage:"linear-gradient(rgba(255,106,0,0.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,106,0,0.035) 1px,transparent 1px)",backgroundSize:"18px 18px" }}/><span style={{ fontFamily:mono,fontSize:9,letterSpacing:3,color:"rgba(255,106,0,0.25)",position:"relative",textAlign:"center",lineHeight:2 }}>ADD IMAGE IN App.jsx<br/>image: "/yourfile.jpg"</span></>
+                }
+              </div>
+            </div>
+            {projects.slice(1).map(p=>(
+              <div key={p.id} style={{ border:"1px solid rgba(255,106,0,0.18)",background:"rgba(3,6,2,0.95)",position:"relative",overflow:"hidden",transition:"all 0.35s ease" }}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="rgba(255,106,0,0.55)";e.currentTarget.style.transform="translateY(-6px)";e.currentTarget.style.boxShadow="0 18px 52px rgba(0,0,0,0.6)";const b=e.currentTarget.querySelector(".pbar");if(b)b.style.height="100%";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="rgba(255,106,0,0.18)";e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="none";const b=e.currentTarget.querySelector(".pbar");if(b)b.style.height="0";}}>
+                <div className="pbar" style={{ position:"absolute",top:0,left:0,width:3,height:0,background:"linear-gradient(180deg,#FF6A00,#FF3D00)",transition:"height 0.4s ease" }}/>
+                <div style={{ height:170,position:"relative",overflow:"hidden",display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(3,6,2,0.98)" }}>
+                  {p.image
+                    ? <img src={p.image} alt="" style={{ width:"100%",height:"100%",objectFit:"cover",opacity:0.85,filter:"saturate(0.7) contrast(1.1)" }}/>
+                    : <><div style={{ position:"absolute",inset:0,backgroundImage:"linear-gradient(rgba(255,106,0,0.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,106,0,0.035) 1px,transparent 1px)",backgroundSize:"18px 18px" }}/><span style={{ fontFamily:mono,fontSize:9,letterSpacing:3,color:"rgba(255,106,0,0.22)",position:"relative" }}>ADD IMAGE</span></>
+                  }
+                </div>
+                <div style={{ padding:"26px 30px" }}>
+                  <div style={{ fontFamily:mono,fontSize:10,letterSpacing:3,color:"rgba(255,106,0,0.4)",marginBottom:12 }}>PROJECT — {p.num}</div>
+                  <div style={{ fontFamily:display,fontSize:30,letterSpacing:3,color:text,marginBottom:10,lineHeight:1.05 }}>{p.title}</div>
+                  <p style={{ fontFamily:body,fontSize:13,lineHeight:1.85,color:muted,fontWeight:300,marginBottom:18 }}>{p.desc}</p>
+                  <div style={{ display:"flex",flexWrap:"wrap",gap:7,marginBottom:20 }}>{p.stack.map(t=><Tag key={t}>{t}</Tag>)}</div>
+                  {p.link&&<a href={p.link} target="_blank" rel="noreferrer" style={{ fontFamily:mono,fontSize:10,letterSpacing:3,color:orange,textDecoration:"none" }}>VIEW PROJECT ——▸</a>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        <Divider/>
+
+        {/* CONTACT */}
+        <Section id="contact" dark>
+          <SectionHeader num="◈ 04" title="MAKE CONTACT"/>
+          <div className="contact-grid" style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:88,alignItems:"start" }}>
+            <div>
+              <p style={{ fontFamily:body,fontSize:15,lineHeight:2.05,color:muted,fontWeight:300,marginBottom:44 }}>Available for full-time roles, freelance contracts, and interesting problems. If you've got something worth building — let's talk.</p>
+              <div style={{ display:"flex",flexDirection:"column",gap:2 }}>
+                {[["◈ Email","mailto:you@email.com"],["◈ GitHub","https://github.com/"],["◈ LinkedIn","https://linkedin.com/"]].map(([label,href])=>(
+                  <a key={label} href={href} className="contact-row" target="_blank" rel="noreferrer">
+                    <span style={{ fontFamily:mono,fontSize:11,letterSpacing:3,color:muted,textTransform:"uppercase" }}>{label}</span>
+                    <span style={{ fontFamily:mono,fontSize:16,color:orange }}>——▸</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+            <div style={{ display:"flex",flexDirection:"column",gap:2 }}>
+              {[["◈ Name","text","Your name"],["◈ Email","email","your@email.com"]].map(([lbl,type,ph])=>(
+                <div key={lbl} style={{ marginBottom:2 }}>
+                  <label style={{ fontFamily:mono,fontSize:9,letterSpacing:3,color:orange,textTransform:"uppercase",display:"block",marginBottom:7 }}>{lbl}</label>
+                  <input type={type} placeholder={ph}/>
+                </div>
+              ))}
+              <div style={{ marginBottom:2 }}>
+                <label style={{ fontFamily:mono,fontSize:9,letterSpacing:3,color:orange,textTransform:"uppercase",display:"block",marginBottom:7 }}>◈ Message</label>
+                <textarea placeholder="What are you working on?" style={{ height:130 }}/>
+              </div>
+              <button className="btn-primary" style={{ marginTop:10,alignSelf:"flex-start" }}>▸ TRANSMIT MESSAGE</button>
+            </div>
+          </div>
+        </Section>
+
+        <footer style={{ padding:"28px 60px",borderTop:"1px solid rgba(255,106,0,0.14)",display:"flex",justifyContent:"space-between",alignItems:"center",position:"relative",zIndex:2,background:"rgba(2,4,1,0.98)" }}>
+          <div style={{ display:"flex",alignItems:"center",gap:8 }}><Logo size={20} color={orange}/><span style={{ fontFamily:display,fontSize:16,letterSpacing:3,color:text }}>MINE</span></div>
+          <div style={{ fontFamily:mono,fontSize:10,letterSpacing:2,color:"rgba(232,223,200,0.12)" }}>© 2025 · ALL RIGHTS RESERVED</div>
+          <div style={{ fontFamily:mono,fontSize:10,letterSpacing:2,color:"rgba(255,106,0,0.28)" }}>CLEARANCE: OPEN · FILE #0047</div>
+        </footer>
+
+      </div>{/* end zoom-root */}
+
+      {/* OUTSIDE zoom root — cursor, bullets, vignette, modal */}
+      <ScopeCursor/>
+      {bullets.map(b=><Bullet key={b.id} x={b.x} y={b.y} id={b.id} onDone={killBullet}/>)}
+
+      <div id="zoom-vig" style={{
+        position:"fixed",inset:0,zIndex:9990,pointerEvents:"none",opacity:0,
+        transition:"opacity 0.1s ease",
+        background:"radial-gradient(ellipse 50% 50% at center,transparent 0%,rgba(0,0,0,0.88) 100%)",
+        boxShadow:"inset 0 0 0 3px rgba(255,106,0,0.4)",
+      }}/>
+
+      {modal && <ProjectModal project={modal} onClose={()=>setModal(null)}/>}
+    </>
+  );
+}
